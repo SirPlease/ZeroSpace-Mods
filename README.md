@@ -9,15 +9,16 @@ file is changed, and nothing is added to your install except the pak itself.
 | [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel | ❌ |
 | [No Popups](no-popups/) | Stops the Early Access welcome and the Galactic War preview from opening by themselves | ❌ |
 
-Every mod folder has three things in it: the pak you can install right away, the source
-that built it, and a README that covers both.
+❌ = Nothing to set up. Install the pak and you are done.
 
-✅ in the last column means the mod has settings you can change in game, under
-Settings -> Mods, and that page comes from the ZS Mod Manager pak. ❌ means it has no
-settings and runs on its own. A mod marked ✅ still works without the manager, it just runs
-on its defaults until you install it.
+✅ = Has settings you can change in game, under Settings -> Mods.
+That page comes from the ZS Mod Manager pak.
+Without it the mod still works, it just uses its default settings.
 
 ## Installing
+
+Every mod folder has three things in it: the pak you can install right away, the source
+that built it, and a README that covers both.
 
 1. Close the game.
 2. Copy the mod's `zzzz_*_P.pak` into
