@@ -4,12 +4,18 @@ Small client-side mods for **ZeroSpace** (Starlance Studios), mostly around Gala
 Each one is a patch pak: it overrides one widget from the game and nothing else. No game
 file is changed, and nothing is added to your install except the pak itself.
 
-| Mod | What it does |
-|---|---|
-| [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel |
+| Mod | What it does | Mod Manager |
+|---|---|---|
+| [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel | ❌ |
+| [No Popups](no-popups/) | Stops the Early Access welcome and the Galactic War preview from opening by themselves | ❌ |
 
 Every mod folder has three things in it: the pak you can install right away, the source
 that built it, and a README that covers both.
+
+✅ in the last column means the mod has settings you can change in game, under
+Settings -> Mods, and that page comes from the ZS Mod Manager pak. ❌ means it has no
+settings and runs on its own. A mod marked ✅ still works without the manager, it just runs
+on its defaults until you install it.
 
 ## Installing
 

@@ -39,6 +39,7 @@ Delete the file.
   (`StarSystemWidgetV2`).
 - Works whether you host or join. Nothing is sent to the server, and it makes no difference
   to anyone else in your party.
+- Standalone. It has no settings, so it does not need the mod manager or any other mod.
 
 ---
 
