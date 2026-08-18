@@ -1,0 +1,14 @@
+# build output
+bin/
+obj/
+*.user
+
+# the game's own assets are never committed, they belong to Starlance Studios.
+*.uasset
+*.uexp
+*.umap
+
+# editors
+.vs/
+.idea/
+*.swp
