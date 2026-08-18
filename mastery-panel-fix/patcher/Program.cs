@@ -496,12 +496,12 @@ class Program
             AppendTails(fn, code, hpend, eos);
         }
 
-        // ================= row colour =================
-        // Each row is drawn white or greyed out by
+        // ================= row color =================
+        // Each row is drawn white or grayed out by
         //     Array_Get(PersistentData.MasteryLevels, i, out item)
-        //     if !(item.Unlocked) goto <grey>
+        //     if !(item.Unlocked) goto <gray>
         // and Unlocked is filled in from the same wrong level count, so a mastered
-        // planet still has grey rows. The test itself cannot be rewritten in place:
+        // planet still has gray rows. The test itself cannot be rewritten in place:
         // it stores a code offset and there is no room in it. So the Array_Get in front
         // of it is redirected instead. The new block runs it, sets item.Unlocked to
         // (real level > i), and jumps back into the game's own test.
@@ -520,7 +520,7 @@ class Program
                         && asset.Imports[-ccm2.StackNode.Index - 1].ObjectName.ToString() == "FTrunc"
                         && ExprJson(ccm2).Contains("CurrentLevelXP"))
                         curSrc = ccm2.Parameters[0];
-            if (curSrc == null) { Console.WriteLine($"{fn.ObjectName}: colour pass, no XP read"); continue; }
+            if (curSrc == null) { Console.WriteLine($"{fn.ObjectName}: color pass, no XP read"); continue; }
 
             KismetExpression TriC(Func<KismetExpression> r) =>
                 Call(DivInt, Call(MulInt, r(), Call(AddInt, r(), Int(1))), Int(2));
@@ -544,7 +544,7 @@ class Program
                     csites.Add((i - 1, i, jn.BooleanExpression, pars[1]));
                 }
             }
-            if (csites.Count == 0) { Console.WriteLine($"{fn.ObjectName}: no row-colour sites"); continue; }
+            if (csites.Count == 0) { Console.WriteLine($"{fn.ObjectName}: no row-color sites"); continue; }
 
             var cpend = new List<(EX_Jump entry, List<KismetExpression> block)>();
             foreach (var s in csites.OrderByDescending(x => x.getIdx))
@@ -565,14 +565,14 @@ class Program
                 };
 
                 int slot = next - off;
-                if (slot < 6) throw new Exception($"{fn.ObjectName}: colour slot too small at {off}");
+                if (slot < 6) throw new Exception($"{fn.ObjectName}: color slot too small at {off}");
                 var entry = new EX_Jump();
                 var pad = new List<KismetExpression> { entry };
                 for (int i = 0; i < slot - 5; i++) pad.Add(new EX_Nothing());
                 code.RemoveAt(s.getIdx);
                 code.InsertRange(s.getIdx, pad);
                 cpend.Add((entry, block));
-                Console.WriteLine($"{fn.ObjectName}: row colour @{off} (slot {slot})");
+                Console.WriteLine($"{fn.ObjectName}: row color @{off} (slot {slot})");
             }
 
             AppendTails(fn, code, cpend, eos);
