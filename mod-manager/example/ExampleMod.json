@@ -1,0 +1,33 @@
+{
+  "id": "ExampleMod",
+  "name": "Example Mod",
+  "pakBuild": "mods/examplemod/pak_build",
+  "settings": [
+    {
+      "key": "Enabled",
+      "label": "Enabled",
+      "master": true,
+      "default": true,
+      "description": "Turn the mod on or off."
+    },
+    {
+      "key": "ShowNumbers",
+      "label": "Show Numbers",
+      "type": "toggle",
+      "default": true,
+      "description": "Whether the numbers are drawn."
+    },
+    {
+      "key": "Size",
+      "label": "Size",
+      "type": "dropdown",
+      "options": [
+        "Small",
+        "Medium",
+        "Large"
+      ],
+      "defaultOption": "Medium",
+      "description": "How big they are drawn."
+    }
+  ]
+}
