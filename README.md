@@ -8,6 +8,7 @@ No game file is changed, and nothing is added to your install except the pak its
 |---|---|---|
 | [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel | ❌ |
 | [No Popups](no-popups/) | Stops the Early Access welcome and the Galactic War preview from opening by themselves | ❌ |
+| [Team Colors](team-colors/) | Colors players by who they are to you: yourself, your teammate, mission allies, enemies | ✅ |
 
 - ❌ = Nothing to set up.  
   Install the pak and you are done.
