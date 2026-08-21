@@ -38,6 +38,10 @@ Delete the file.
 - Built for game build **24827478** (the 2026-08-20 patch).  
   A game update that changes the in-match HUD may require an updated version of this pak.
 - Conflicts with any other mod that replaces the same HUD widget (`RTSSampleHUDWidget`).
+- Smoothest when you host.  
+  Hosting sets each player's color once and it stays.  
+  When you join someone else's match, the mod recolors units one by one every couple of
+  seconds, so a unit that has just been built keeps its normal color until the next pass.
 - Options live in **Settings -> Mods**.  
   That page comes from the ZS Mod Manager pak.  
   Without the manager the mod still runs, on the defaults listed above.
