@@ -8,6 +8,7 @@ No game file is changed, and nothing is added to your install except the pak its
 |---|---|---|---|
 | [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel | ❌ | ❌ |
 | [Mastered Marker](mastered-marker/) | Shows a planet's mastery rank, and marks the mastered ones, on the galaxy map's hover tooltip | ❌ | ❌ |
+| [Block Auto Chase](block-auto-chase/) | Stops your units walking back into a fight after you send them somewhere else | ❌ | ✅ |
 | [No Popups](no-popups/) | Stops the Early Access welcome and the Galactic War preview from opening by themselves | ❌ | ❌ |
 | [Team Colors](team-colors/) | Colors players by who they are to you: yourself, your teammate, mission allies, enemies | ✅ | ✅ |
 
@@ -22,10 +23,12 @@ No game file is changed, and nothing is added to your install except the pak its
 **Host**
 
 - ❌ = Works the same whether you host the match or join one.
-- ✅ = Smoothest when you host.  
-  Team Colors sets each player's color once when you host, and it stays.  
-  When you join, it recolors units one by one every couple of seconds instead, so a unit
-  that has just been built keeps its normal color until the next pass.
+- ✅ = Needs you to be the host.  
+  Block Auto Chase does nothing at all when you join someone else's match, because unit
+  behavior is decided by whoever hosts.  
+  Team Colors is milder: hosting sets each player's color once and it stays, while joining
+  recolors units one by one every couple of seconds, so a unit that has just been built keeps
+  its normal color until the next pass.
 
 ## [ZS Mod Manager](mod-manager/)
 
