@@ -1,9 +1,8 @@
-// Team Colors
+﻿// Team Colors
 //
-// Patches the in-match HUD widget (RTSSampleHUDWidget) so that every player in the
-// match is recolored by their relation to you: yourself, your teammate, a mission
-// AI ally, an enemy. Colors come from the mod's settings, or from built-in
-// defaults when there are no settings to read.
+// Patches the in-match HUD widget (RTSSampleHUDWidget) to recolor every player by their
+// relation to you: yourself, teammate, mission AI ally, enemy. Colors come from the mod's
+// settings, or from built-in defaults.
 
 using UAssetAPI;
 using UAssetAPI.ExportTypes;
@@ -12,6 +11,8 @@ using UAssetAPI.Kismet;
 using UAssetAPI.Kismet.Bytecode;
 using UAssetAPI.Kismet.Bytecode.Expressions;
 using UAssetAPI.UnrealTypes;
+using ZSPatchKit;
+using static ZSPatchKit.Kis;
 
 class Program
 {
@@ -45,143 +46,13 @@ class Program
     const string DefaultEnemy = "Red";
     const bool DefaultMinimapColors = true;
 
-    static UAsset asset = null!;
-
-    // how many bytes a statement takes once written out, for placing the new block
-    static int Measure(KismetExpression e)
-    {
-        int i = 0;
-        KismetSerializer.SerializeExpression(e, ref i, false);
-        return i;
-    }
-
-    // ---------- imports ----------
-
-    static int FindImport(string objectName, string className = "")
-    {
-        for (int i = 0; i < asset.Imports.Count; i++)
-            if (asset.Imports[i].ObjectName.ToString() == objectName &&
-                (className == "" || asset.Imports[i].ClassName.ToString() == className))
-                return -(i + 1);
-        return 0;
-    }
-    static FPackageIndex AddImport(string classPackage, string className, FPackageIndex outer, string objectName)
-    {
-        asset.Imports.Add(new Import(
-            FName.FromString(asset, classPackage), FName.FromString(asset, className),
-            outer, FName.FromString(asset, objectName), false));
-        Console.WriteLine($"  +import {className} {objectName}");
-        return new FPackageIndex(-asset.Imports.Count);
-    }
-    static FPackageIndex EnsurePackage(string pkg)
-    {
-        int i = FindImport(pkg, "Package");
-        return i != 0 ? new FPackageIndex(i) : AddImport("/Script/CoreUObject", "Package", new FPackageIndex(0), pkg);
-    }
-    static FPackageIndex EnsureClass(string scriptPkg, string cls)
-    {
-        int i = FindImport(cls, "Class");
-        return i != 0 ? new FPackageIndex(i) : AddImport("/Script/CoreUObject", "Class", EnsurePackage(scriptPkg), cls);
-    }
-    // Only import a function that really lives in the class it is named under. If the
-    // game cannot find it, the call is left null and the game crashes on the spot.
-    static FPackageIndex EnsureFn(string scriptPkg, string owningClass, string fn)
-    {
-        int i = FindImport(fn, "Function");
-        return i != 0 ? new FPackageIndex(i) : AddImport("/Script/CoreUObject", "Function", EnsureClass(scriptPkg, owningClass), fn);
-    }
-    static FPackageIndex EnsureStruct(string scriptPkg, string name)
-    {
-        int i = FindImport(name, "ScriptStruct");
-        return i != 0 ? new FPackageIndex(i) : AddImport("/Script/CoreUObject", "ScriptStruct", EnsurePackage(scriptPkg), name);
-    }
-    // class-default object import (e.g. Default__KismetArrayLibrary), the shape the
-    // game itself uses to call a static library function
-    static FPackageIndex EnsureDefaultObject(string scriptPkg, string cls)
-    {
-        string n = "Default__" + cls;
-        int i = FindImport(n);
-        return i != 0 ? new FPackageIndex(i) : AddImport(scriptPkg, cls, EnsurePackage(scriptPkg), n);
-    }
-    static FPackageIndex ImportSaveClass()
-    {
-        int i = FindImport(SaveClsName);
-        return i != 0 ? new FPackageIndex(i)
-            : AddImport("/Script/Engine", "BlueprintGeneratedClass", EnsurePackage(SavePkgPath), SaveClsName);
-    }
-
-    // ---------- expression builders ----------
-
-    static KismetPropertyPointer Ptr(FName name, FPackageIndex owner) =>
-        new KismetPropertyPointer { New = new FFieldPath { Path = new[] { name }, ResolvedOwner = owner } };
-    static KismetPropertyPointer NullPtr() =>
-        new KismetPropertyPointer { New = new FFieldPath { Path = Array.Empty<FName>(), ResolvedOwner = new FPackageIndex(0) } };
-
-    static EX_CallMath Call(FPackageIndex fn, params KismetExpression[] args) =>
-        new EX_CallMath { StackNode = fn, Parameters = args };
-    static EX_StringConst Str(string s) => new EX_StringConst { Value = s };
-    static EX_IntConst Int(int v) => new EX_IntConst { Value = v };
-    static EX_ByteConst Byte(byte v) => new EX_ByteConst { Value = v };
-
-    // obj.<prop> read
-    static EX_Context ReadMember(KismetExpression objLocal, FName prop, FPackageIndex ownerCls)
-    {
-        var iv = new EX_InstanceVariable { Variable = Ptr(prop, ownerCls) };
-        return new EX_Context
-        {
-            ObjectExpression = objLocal,
-            Offset = (uint)Measure(iv),
-            RValuePointer = Ptr(prop, ownerCls),
-            ContextExpression = iv,
-        };
-    }
-
-    // obj.<NativeFn>(args). RValuePointer is the local the result lands in when the
-    // call is consumed by an assignment, which is how the game writes these calls.
-    static EX_Context CallOn(KismetExpression objLocal, FPackageIndex fn, KismetPropertyPointer? rv, params KismetExpression[] args)
-    {
-        var ff = new EX_FinalFunction { StackNode = fn, Parameters = args };
-        return new EX_Context
-        {
-            ObjectExpression = objLocal,
-            Offset = (uint)Measure(ff),
-            RValuePointer = rv ?? NullPtr(),
-            ContextExpression = ff,
-        };
-    }
-
-    // reach into a struct member, and again for a member of that member
-    static EX_StructMemberContext SM(KismetExpression inner, FName prop, FPackageIndex structTy) =>
-        new EX_StructMemberContext { StructMemberExpression = Ptr(prop, structTy), StructExpression = inner };
-
-    static EX_Context ArrayLib(FPackageIndex defaultObj, FPackageIndex fn, params KismetExpression[] args)
-    {
-        var ff = new EX_FinalFunction { StackNode = fn, Parameters = args };
-        return new EX_Context
-        {
-            ObjectExpression = new EX_ObjectConst { Value = defaultObj },
-            Offset = (uint)Measure(ff),
-            RValuePointer = NullPtr(),
-            ContextExpression = ff,
-        };
-    }
-
-    // Default paths are relative to the repo, and `dotnet run` starts in the project
-    // folder, so climb up until the vanilla asset comes into view.
-    static string RepoRoot()
-    {
-        var dir = Directory.GetCurrentDirectory();
-        while (dir != null)
-        {
-            if (File.Exists(Path.Combine(dir, DefaultInput))) return dir;
-            dir = Path.GetDirectoryName(dir);
-        }
-        return Directory.GetCurrentDirectory();
-    }
+    // Loading, imports, expression builders, jump validation: mods\lib\ZSPatchKit.
+    static ModAsset A = null!;
+    static UAsset asset => A.Asset;
 
     static void Main(string[] args)
     {
-        var root = RepoRoot();
+        var root = Repo.Root(DefaultInput);
         var inPath = args.Length > 0 ? args[0] : Path.Combine(root, DefaultInput);
         var outDir = Path.Combine(args.Length > 1 ? args[1] : Path.Combine(root, DefaultOutput), AssetSubDir);
 
@@ -197,7 +68,7 @@ class Program
         Console.WriteLine($"defaults: self={defSelf} mate={defMate} mission={defMission} enemy={defEnemy} minimap={defMinimap}");
 
         Directory.CreateDirectory(outDir);
-        asset = new UAsset(inPath, EngineVersion.VER_UE4_27);
+        A = ModAsset.Load(inPath);
         if (!asset.VerifyBinaryEquality()) throw new Exception("HUD donor: round-trip not binary-equal");
         KismetSerializer.asset = asset;
 
@@ -239,53 +110,51 @@ class Program
         Console.WriteLine($"vanilla Delay found (LatentActionInfo StructSize {vanillaLatent.StructSize})");
 
         // ---- imports ----
-        var fnLoad = EnsureFn("/Script/Engine", "GameplayStatics", "LoadGameFromSlot");
-        var fnIsValid = EnsureFn("/Script/Engine", "KismetSystemLibrary", "IsValid");
-        var fnLess = EnsureFn("/Script/Engine", "KismetMathLibrary", "Less_IntInt");
-        var fnAdd = EnsureFn("/Script/Engine", "KismetMathLibrary", "Add_IntInt");
-        var fnGeInt = EnsureFn("/Script/Engine", "KismetMathLibrary", "GreaterEqual_IntInt");
-        var fnLeInt = EnsureFn("/Script/Engine", "KismetMathLibrary", "LessEqual_IntInt");
-        var fnB2Int = EnsureFn("/Script/Engine", "KismetMathLibrary", "Conv_ByteToInt");
-        var fnEqB = EnsureFn("/Script/Engine", "KismetMathLibrary", "EqualEqual_ByteByte");
-        var fnNeObj = EnsureFn("/Script/Engine", "KismetMathLibrary", "NotEqual_ObjectObject");
-        var fnNot = EnsureFn("/Script/Engine", "KismetMathLibrary", "Not_PreBool");
-        var fnI2Byte = EnsureFn("/Script/Engine", "KismetMathLibrary", "Conv_IntToByte");
-        var fnArrGet = EnsureFn("/Script/Engine", "KismetArrayLibrary", "Array_Get");
-        var fnArrLen = EnsureFn("/Script/Engine", "KismetArrayLibrary", "Array_Length");
-        var arrLibObj = EnsureDefaultObject("/Script/Engine", "KismetArrayLibrary");
-        var fnGetTeamInfo = EnsureFn("/Script/RTSPlugin", "RTSPlayerController", "GetTeamInfo");
-        var fnChangeColor = EnsureFn("/Script/RTS", "NovaPlayerState", "ChangePlayerColor");
-        var fnGetDispColor = EnsureFn("/Script/RTS", "NovaPlayerState", "GetDisplayedColor");
+        var fnLoad = A.EnsureFn("/Script/Engine", "GameplayStatics", "LoadGameFromSlot");
+        var fnIsValid = A.EnsureFn("/Script/Engine", "KismetSystemLibrary", "IsValid");
+        var fnLess = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "Less_IntInt");
+        var fnAdd = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "Add_IntInt");
+        var fnGeInt = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "GreaterEqual_IntInt");
+        var fnLeInt = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "LessEqual_IntInt");
+        var fnB2Int = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "Conv_ByteToInt");
+        var fnEqB = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "EqualEqual_ByteByte");
+        var fnNeObj = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "NotEqual_ObjectObject");
+        var fnNot = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "Not_PreBool");
+        var fnI2Byte = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "Conv_IntToByte");
+        var fnArrGet = A.EnsureFn("/Script/Engine", "KismetArrayLibrary", "Array_Get");
+        var fnArrLen = A.EnsureFn("/Script/Engine", "KismetArrayLibrary", "Array_Length");
+        var arrLibObj = A.EnsureDefaultObject("/Script/Engine", "KismetArrayLibrary");
+        var fnGetTeamInfo = A.EnsureFn("/Script/RTSPlugin", "RTSPlayerController", "GetTeamInfo");
+        var fnChangeColor = A.EnsureFn("/Script/RTS", "NovaPlayerState", "ChangePlayerColor");
+        var fnGetDispColor = A.EnsureFn("/Script/RTS", "NovaPlayerState", "GetDisplayedColor");
         // ChangePlayerColor is the game's authoritative setter and only does anything on
         // the machine hosting the match. ChangeUnitTeamColor is the display-only one, so
         // it is what makes the colors appear when you have joined someone else's game.
-        var fnChangeUnitColor = EnsureFn("/Script/RTS", "NovaPlayerState", "ChangeUnitTeamColor");
-        var fnGetOwnedUnits = EnsureFn("/Script/RTS", "NovaPlayerState", "GetOwnedUnits");
-        var clsActor = EnsureClass("/Script/Engine", "Actor");
-        var clsNovaPC = EnsureClass("/Script/RTS", "NovaPlayerController");
-        var clsNovaPS = EnsureClass("/Script/RTS", "NovaPlayerState");
-        var clsTeamInfo = EnsureClass("/Script/RTSPlugin", "RTSTeamInfo");
-        var clsPlayerState = EnsureClass("/Script/Engine", "PlayerState");
-        var clsSaveGame = EnsureClass("/Script/Engine", "SaveGame");
-        var stLobbyInfo = EnsureStruct("/Script/RTS", "NovaLobbyInfo");
-        var stTeam = EnsureStruct("/Script/RTS", "NovaLobbyTeamInfo");
-        var stSlot = EnsureStruct("/Script/RTS", "NovaPlayerStartSlot");
-        var stBound = EnsureStruct("/Script/RTS", "NovaLobbyBoundPlayerInfo");
-        var saveCls = ImportSaveClass();
+        var fnChangeUnitColor = A.EnsureFn("/Script/RTS", "NovaPlayerState", "ChangeUnitTeamColor");
+        var fnGetOwnedUnits = A.EnsureFn("/Script/RTS", "NovaPlayerState", "GetOwnedUnits");
+        var clsActor = A.EnsureClass("/Script/Engine", "Actor");
+        var clsNovaPC = A.EnsureClass("/Script/RTS", "NovaPlayerController");
+        var clsNovaPS = A.EnsureClass("/Script/RTS", "NovaPlayerState");
+        var clsTeamInfo = A.EnsureClass("/Script/RTSPlugin", "RTSTeamInfo");
+        var clsPlayerState = A.EnsureClass("/Script/Engine", "PlayerState");
+        var clsSaveGame = A.EnsureClass("/Script/Engine", "SaveGame");
+        var stLobbyInfo = A.EnsureStruct("/Script/RTS", "NovaLobbyInfo");
+        var stTeam = A.EnsureStruct("/Script/RTS", "NovaLobbyTeamInfo");
+        var stSlot = A.EnsureStruct("/Script/RTS", "NovaPlayerStartSlot");
+        var stBound = A.EnsureStruct("/Script/RTS", "NovaLobbyBoundPlayerInfo");
+        var saveCls = A.EnsureBlueprintClass(SavePkgPath, SaveClsName);
         // this one the widget already imports for its own use, so ask for it rather
         // than adding a second copy
-        int giSettings = FindImport("GetNovaGameUserSettings", "Function");
+        int giSettings = A.FindImport("GetNovaGameUserSettings", "Function");
         if (giSettings == 0) throw new Exception("GetNovaGameUserSettings import missing from HUD");
         var fnGetSettings = new FPackageIndex(giSettings);
-        var clsNovaGUS = EnsureClass("/Script/RTS", "NovaGameUserSettings");
-        var fnSetVisual = EnsureFn("/Script/RTS", "NovaGameUserSettings", "SetVisualColoring");
-        var fnNeByte = EnsureFn("/Script/Engine", "KismetMathLibrary", "NotEqual_ByteByte");
+        var clsNovaGUS = A.EnsureClass("/Script/RTS", "NovaGameUserSettings");
+        var fnSetVisual = A.EnsureFn("/Script/RTS", "NovaGameUserSettings", "SetVisualColoring");
+        var fnNeByte = A.EnsureFn("/Script/Engine", "KismetMathLibrary", "NotEqual_ByteByte");
 
         // ---- locals ----
-        // New locals go on the end of the list, so every existing one keeps its place.
-        // An authored property has to fill in all of the common fields, not only the
-        // ones its type needs: leave ArrayDim or RepNotifyFunc out and the game either
-        // crashes while loading the asset or reads a garbage name.
+        // Appended, so every existing local keeps its place. An authored property must fill
+        // in the common fields too: no ArrayDim or RepNotifyFunc means a crash on load.
         FProperty CommonLocal(FProperty p, string name, string ser, int elem)
         {
             p.Name = FName.FromString(asset, name);
@@ -328,7 +197,7 @@ class Program
 
         var lSave = Local("ZSTC_Save", "object", clsSaveGame);
         var lB = Local("ZSTC_B", "bool");
-        var lPCraw = Local("ZSTC_PCRaw", "object", EnsureClass("/Script/Engine", "PlayerController"));
+        var lPCraw = Local("ZSTC_PCRaw", "object", A.EnsureClass("/Script/Engine", "PlayerController"));
         var lPC = Local("ZSTC_PC", "object", clsNovaPC);
         var lTeamObj = Local("ZSTC_TeamObj", "object", clsTeamInfo);
         var lMyTeam = Local("ZSTC_MyTeam", "byte");
@@ -417,16 +286,11 @@ class Program
         Emit(LetByte("ZSTC_EnemyB", Call(fnI2Byte, Setting("ZSTeamColors_EnemyColorIdx"))));
         Emit(LetBool(lMini, Setting("ZSTeamColors_MinimapColors")));
 
-        // The minimap toggle is an either/or the game itself imposes. Its native drawing
-        // code has two paths, and only one of them exists at a time:
-        //   on  -> every unit is drawn in its owner's color, so a mission AI ally is
-        //          told apart from a teammate. The pale green glow on selected units is
-        //          not drawn in this path.
-        //   off -> the game's usual minimap, glow included, but every ally shares one
-        //          color, so mission AI looks like a teammate.
-        // Having both would mean changing the game's own code, which this mod does not
-        // do. The ON branch also sets the unit color mode, because the per player
-        // minimap path is only used while that mode is picked.
+        // The minimap toggle is an either/or the game imposes: its native drawing has two
+        // paths and only one runs at a time.
+        //   on  -> per-owner colors, so mission AI is told apart, but no selection glow
+        //   off -> the usual minimap with the glow, but every ally shares one color
+        // The ON branch also sets the unit color mode, which that path needs.
         EX_Context ApplySettings() => new EX_Context
         {
             ObjectExpression = lGUS(),
@@ -476,18 +340,18 @@ class Program
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "SCHED");
         Emit(LetByte("ZSTC_MyTeam", ReadMember(lTeamObj(), P("TeamIndex"), clsTeamInfo)));
         Emit(LetStruct("ZSTC_Lobby", ReadMember(lPC(), P("CurrentMapLobbyInfo"), clsNovaPC)));
-        Emit(LetInt("ZSTC_NT", ArrayLib(arrLibObj, fnArrLen, SM(lLobby(), P("Teams"), stLobbyInfo))));
+        Emit(LetInt("ZSTC_NT", LibCall(arrLibObj, fnArrLen, SM(lLobby(), P("Teams"), stLobbyInfo))));
         Emit(LetInt("ZSTC_I", Int(0)));
 
         Emit(LetBool(lB, Call(fnLess, lI(), lNT())), label: "TEAMLOOP");
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "SCHED");
-        Emit(ArrayLib(arrLibObj, fnArrGet, SM(lLobby(), P("Teams"), stLobbyInfo), lI(), lTeam()));
-        Emit(LetInt("ZSTC_NS", ArrayLib(arrLibObj, fnArrLen, SM(lTeam(), P("Slots"), stTeam))));
+        Emit(LibCall(arrLibObj, fnArrGet, SM(lLobby(), P("Teams"), stLobbyInfo), lI(), lTeam()));
+        Emit(LetInt("ZSTC_NS", LibCall(arrLibObj, fnArrLen, SM(lTeam(), P("Slots"), stTeam))));
         Emit(LetInt("ZSTC_J", Int(0)));
 
         Emit(LetBool(lB, Call(fnLess, lJ(), lNS())), label: "SLOTLOOP");
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "NEXTTEAM");
-        Emit(ArrayLib(arrLibObj, fnArrGet, SM(lTeam(), P("Slots"), stTeam), lJ(), lSlot()));
+        Emit(LibCall(arrLibObj, fnArrGet, SM(lTeam(), P("Slots"), stTeam), lJ(), lSlot()));
         Emit(LetObj(lPS, SM(SM(lSlot(), P("BoundPlayer"), stSlot), P("PlayerState"), stBound)));
         Emit(LetBool(lB, Call(fnIsValid, lPS())));
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "NEXTSLOT");
@@ -495,11 +359,8 @@ class Program
         Emit(LetBool(lB, Call(fnIsValid, lNPS())));
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "NEXTSLOT");
 
-        // Who is this. Another team means enemy. On your own team, the slot number says
-        // whether the player is a real one or a mission AI the map script runs: slots 2
-        // to 13 are real player slots, 14 to 25 are the map's own AI. A computer that
-        // filled a real slot counts as a teammate, which is why nothing here asks
-        // whether the player is a bot.
+        // Another team means enemy. On your own team the slot number decides: 2 to 13 are
+        // real player slots, 14 to 25 are the map's AI. A bot in a real slot is a teammate.
         Emit(LetBool(lB, Call(fnEqB, SM(lTeam(), P("TeamIndex"), stTeam), lMyTeam())));
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "SET_ENEMY");
         Emit(LetBool(lB, Call(fnGeInt,
@@ -527,17 +388,14 @@ class Program
         Emit(new EX_Jump(), jump: "NEXTSLOT");
         Emit(CallOn(lNPS(), fnChangeColor, null, lTarget()), label: "CHANGE");
 
-        // Then recolor the player's units one by one, which is the part that works
-        // when you are not hosting. Hosting makes the call above stick, so the color
-        // then matches on the next pass and this loop is skipped from there on.
-        // Both arguments are plain variables. A call nested into an argument here would
-        // make the game read the wrong memory and crash.
+        // Then recolor the units one by one, which is the part that works when you are not
+        // hosting. Both arguments are plain variables, per the by-reference rule.
         Emit(LetArr("ZSTC_Units", CallOn(lNPS(), fnGetOwnedUnits, LP("ZSTC_Units"))));
-        Emit(LetInt("ZSTC_NU", ArrayLib(arrLibObj, fnArrLen, lUnits())));
+        Emit(LetInt("ZSTC_NU", LibCall(arrLibObj, fnArrLen, lUnits())));
         Emit(LetInt("ZSTC_K", Int(0)));
         Emit(LetBool(lB, Call(fnLess, lK(), lNU())), label: "UNITLOOP");
         Emit(new EX_JumpIfNot { BooleanExpression = lB() }, jump: "NEXTSLOT");
-        Emit(ArrayLib(arrLibObj, fnArrGet, lUnits(), lK(), lUnit()));
+        Emit(LibCall(arrLibObj, fnArrGet, lUnits(), lK(), lUnit()));
         Emit(Call(fnChangeUnitColor, lUnit(), lTarget()));
         Emit(LetInt("ZSTC_K", Call(fnAdd, lK(), Int(1))));
         Emit(new EX_Jump(), jump: "UNITLOOP");

@@ -1,4 +1,4 @@
-// Mastery Panel Fix
+﻿// Mastery Panel Fix
 //
 // Rewrites part of the planet panel widget (StarSystemWidgetV2) so the mastery numbers
 // on it are the real ones.
@@ -10,13 +10,16 @@ using UAssetAPI;
 using UAssetAPI.ExportTypes;
 using UAssetAPI.FieldTypes;
 using UAssetAPI.UnrealTypes;
+using ZSPatchKit;
+using static ZSPatchKit.Kis;
 using UAssetAPI.Kismet;
 using UAssetAPI.Kismet.Bytecode;
 using UAssetAPI.Kismet.Bytecode.Expressions;
 
 class Program
 {
-    static UAsset asset = null!;
+    static ModAsset A = null!;
+    static UAsset asset => A.Asset;
 
     const string VanillaAsset = @"tools\raw\ssw_raw\StarSystemWidgetV2.uasset";
     const string OutputRoot   = @"mods\masterypanelfix\pak_build";
@@ -24,58 +27,13 @@ class Program
 
     static void Main(string[] args)
     {
-        var root = RepoRoot();
+        var root = Repo.Root(VanillaAsset);
         var inPath  = args.Length > 0 ? args[0] : System.IO.Path.Combine(root, VanillaAsset);
         var outRoot = args.Length > 1 ? args[1] : System.IO.Path.Combine(root, OutputRoot);
         PatchPlanetPanel(inPath, outRoot);
     }
 
-    // The default paths are relative to the repo, and `dotnet run` starts in the
-    // project folder, so climb up until the vanilla asset comes into view.
-    static string RepoRoot()
-    {
-        var dir = System.IO.Directory.GetCurrentDirectory();
-        while (dir != null)
-        {
-            if (System.IO.File.Exists(System.IO.Path.Combine(dir, VanillaAsset))) return dir;
-            dir = System.IO.Path.GetDirectoryName(dir);
-        }
-        return System.IO.Directory.GetCurrentDirectory();
-    }
-
-    // ---------------- bytecode helpers ----------------
-
-    static FPackageIndex AddFunctionImport(string owner, string fn)
-    {
-        int outerIdx = 0;
-        for (int i = 0; i < asset.Imports.Count; i++)
-            if (asset.Imports[i].ObjectName.ToString() == owner && asset.Imports[i].ClassName.ToString() == "Class")
-                outerIdx = -(i + 1);
-        if (outerIdx == 0) throw new Exception("class import not found: " + owner);
-        var imp = new Import(
-            FName.FromString(asset, "/Script/CoreUObject"),
-            FName.FromString(asset, "Function"),
-            new FPackageIndex(outerIdx),
-            FName.FromString(asset, fn),
-            false);
-        asset.Imports.Add(imp);
-        return new FPackageIndex(-asset.Imports.Count);
-    }
-
-    static EX_CallMath Call(FPackageIndex fn, params KismetExpression[] args)
-        => new EX_CallMath { StackNode = fn, Parameters = args };
-
-    static EX_StringConst Str(string s) => new EX_StringConst { Value = s };
-    static EX_FloatConst Flt(float f) => new EX_FloatConst { Value = f };
-    static EX_IntConst Int(int v) => new EX_IntConst { Value = v };
-
-    // how many bytes a statement takes once written out, for placing the new blocks
-    static int Measure(KismetExpression e)
-    {
-        int i = 0;
-        KismetSerializer.SerializeExpression(e, ref i, false);
-        return i;
-    }
+    // Repo root, imports and expression builders: mods\lib\ZSPatchKit.
 
     static IEnumerable<KismetExpression> Children(KismetExpression e)
     {
@@ -106,11 +64,9 @@ class Program
         return KismetSerializer.SerializeExpression(e, ref i, false).ToString();
     }
 
-    // Some expressions store code offsets inside themselves. Move one and those
-    // offsets still point at the old place, which sends the VM somewhere random. The
-    // one that matters here is EX_SwitchValue: the level rows are printed through a
-    // switch over the four row widgets. That is why the patch changes the statement
-    // that builds the switch's argument and leaves the switch where it is.
+    // Some expressions store code offsets inside themselves and break when moved. The one
+    // here is EX_SwitchValue, which is why the patch rewrites the statement that builds the
+    // switch's argument and leaves the switch alone.
     static readonly string[] OffsetBearing = {
         "EX_SwitchValue", "EX_Jump", "EX_JumpIfNot", "EX_PushExecutionFlow",
         "EX_PopExecutionFlowIfNot", "EX_ComputedJump", "EX_Skip"
@@ -123,17 +79,39 @@ class Program
                 throw new Exception($"{what}: cannot relocate expression containing {n.GetType().Name} (absolute code offsets)");
     }
 
-    // Some engine functions take an argument by reference. Those read the address of
-    // the last property the VM touched instead of the value that was just worked out,
-    // so passing them a nested call makes them read the wrong memory and crash the
-    // game. Give them a plain variable and they are fine. Arguments passed by value can
-    // be any expression. Strings and text are by reference, ints and bools by value.
+    // By-reference arguments read the address of the last property the VM touched, so a
+    // nested call as an argument crashes the game. Pass a plain variable. Strings and text
+    // are by reference, ints and bools by value.
     static readonly Dictionary<string, int[]> RefParamFunctions = new()
     {
         { "Conv_TextToString", new[] { 0 } },
         { "Conv_StringToInt",  new[] { 0 } },
         { "RightChop",         new[] { 0 } },   // Count is by-value int
+        // NOT Concat_StrStr or Conv_StringToText: vanilla passes them nested arguments, so
+        // listing them here only flags shipped code. The tail block still hands them locals.
     };
+
+    // Same rule over a chosen set of statements, for assets where vanilla code passes
+    // nested arguments of its own and a whole-asset sweep would flag it.
+    static void AuditRefArgs(IEnumerable<KismetExpression> stmts, string where)
+    {
+        var problems = new List<string>();
+        void Check(KismetExpression e)
+        {
+            if (e is EX_CallMath cm && cm.StackNode.Index < 0
+                && RefParamFunctions.TryGetValue(asset.Imports[-cm.StackNode.Index - 1].ObjectName.ToString(), out var refIdx))
+            {
+                foreach (var i in refIdx)
+                    if (i < cm.Parameters.Length && !(cm.Parameters[i] is EX_LocalVariable || cm.Parameters[i] is EX_InstanceVariable || cm.Parameters[i] is EX_DefaultVariable))
+                        problems.Add($"{where}: {asset.Imports[-cm.StackNode.Index - 1].ObjectName} param {i} is {cm.Parameters[i].GetType().Name} - by-reference parameters require a plain variable");
+            }
+            foreach (var c in Children(e)) Check(c);
+        }
+        foreach (var st in stmts) Check(st);
+        if (problems.Count > 0)
+            throw new Exception("by-reference argument audit failed:\n  " + string.Join("\n  ", problems.Distinct()));
+        Console.WriteLine($"  by-reference argument audit ({where}): OK");
+    }
 
     static void AuditRefArgs()
     {
@@ -165,7 +143,7 @@ class Program
         System.IO.Directory.CreateDirectory(outDir);
         Console.WriteLine("in:  " + inPath);
 
-        asset = new UAsset(inPath, EngineVersion.VER_UE4_27);
+        A = ModAsset.Load(inPath);
         KismetSerializer.asset = asset;
 
         FPackageIndex FindFnOpt(string name)
@@ -178,14 +156,11 @@ class Program
         FPackageIndex FindOrAdd(string owner, string name)
         {
             var f = FindFnOpt(name);
-            return f.Index != 0 ? f : AddFunctionImport(owner, name);
+            return f.Index != 0 ? f : A.AddFunctionImportUnder(owner, name);
         }
 
-        // Only import a function that really lives in the class you name it under. If
-        // the game cannot find it the call is left null and the game crashes on the
-        // spot. Everything below is either already imported by the widget itself or was
-        // checked against the shipped game binary. Note there is no Select* helper in
-        // here: a normal branch does the same job and needs no import.
+        // The function must really live in the class it is named under, or the game leaves
+        // the call null and crashes on it. Every name below was checked against the game.
         var FTruncFn    = FindOrAdd("KismetMathLibrary", "FTrunc");
         var GeInt       = FindOrAdd("KismetMathLibrary", "GreaterEqual_IntInt");
         var AddInt      = FindOrAdd("KismetMathLibrary", "Add_IntInt");
@@ -236,21 +211,16 @@ class Program
         var menuFunctions = new[] { "RefreshMenu", "UpdateAllMenus", "__ubergraph" };
 
         // ================= level rows =================
-        // The game prints the mastery's per-stack text on all four rows, so a planet
-        // that gives +50 vision reads "+50 unit vision range" four times over. Each row
-        // now shows what you actually hold at that level. Reaching level n hands you n
-        // more stacks, so the total you hold is 1, 3, 6 then 10, which is n(n+1)/2.
+        // The game prints the per-stack text on all four rows. Each row now shows what you
+        // hold at that level: 1, 3, 6 then 10 stacks, which is n(n+1)/2.
         foreach (var fname in menuFunctions)
         {
             var fn = Fn(fname);
             var fnJson = KismetSerializer.SerializeScript(fn.ScriptBytecode);
             var code = fn.ScriptBytecode.ToList();
 
-            // A spare string variable to pull the description apart in. It has to be
-            // one the game never reads again afterwards. In the two menu functions
-            // CallFunc_ToUpper_ReturnValue is finished with long before the rows, and
-            // in the ubergraph Temp_string_Variable is overwritten right before its
-            // only read. Check this again if the widget ever changes.
+            // A spare string variable to pull the description apart in. It must be one the
+            // game never reads again: both of these are dead by the time the rows run.
             var scratchName = fname == "__ubergraph" ? "Temp_string_Variable" : "CallFunc_ToUpper_ReturnValue";
             EX_Let? scratchLet = null;
             foreach (var st in fn.ScriptBytecode)
@@ -263,10 +233,8 @@ class Program
             var ScratchVar = scratchLet.Variable;
             AssertRelocatable(ScratchVar, $"{fn.ObjectName} scratch local");
 
-            // A row is a SetText on the Mastery1..Mastery1_3 widget switch whose
-            // argument is not a constant (the constant one is the "blank this row"
-            // path). This widget has other switches for unrelated lists, so the name
-            // is checked too.
+            // A row is a SetText on the Mastery1..Mastery1_3 switch with a non-constant
+            // argument. The widget has other switches, so the name is checked too.
             var rows = new List<int>();
             for (int i = 0; i < code.Count; i++)
                 if (code[i] is EX_Context cx && cx.ObjectExpression is EX_SwitchValue
@@ -285,11 +253,8 @@ class Program
             var pend = new List<(EX_Jump entry, List<KismetExpression> block)>();
             foreach (var r in rowInfo.OrderByDescending(x => x.idx))
             {
-                // The SetText statement stays where it is, because it holds the switch
-                // that cannot be moved. What gets replaced is the statement that builds
-                // its argument:
-                //     CallFunc_Format_ReturnValue = Format("Level {a} {b}", ...)
-                // The switch then prints our text without knowing anything changed.
+                // The SetText stays put, since it holds the switch. What is replaced is the
+                // statement that builds its argument, the Format call.
                 var rowArg = ((EX_VirtualFunction)((EX_Context)code[r.idx]).ContextExpression).Parameters[0];
                 var argName = (rowArg as EX_LocalVariable)?.Variable?.New?.Path?.LastOrDefault().ToString();
                 if (argName == null) throw new Exception($"{fn.ObjectName}: row arg is not a local at {r.off}");
@@ -319,14 +284,9 @@ class Program
                 int letOff  = (int)fnJson[letIdx]!["StatementIndex"]!;
                 int letNext = (int)fnJson[letIdx + 1]!["StatementIndex"]!;
 
-                // Every mastery description looks like "+<number>[%] <words>", so the
-                // number can be read back out at run time and multiplied:
-                //   S    = Conv_TextToString(description)   kept in the spare variable
-                //   n    = Conv_StringToInt(S)              "+4% turret damage." -> 4
-                //   rest = RightChop(S, 2 + [n >= 10])      cuts off "+" and the digits
-                //   line = "+" + n * stacks + rest
-                // S goes in as a plain variable because Conv_StringToInt and RightChop
-                // take it by reference (see RefParamFunctions above).
+                // Every description reads "+<number>[%] <words>", so the number is read back
+                // out and multiplied: n = StringToInt(S), rest = RightChop(S, 2 + [n >= 10]),
+                // line = "+" + n * stacks + rest. S is a plain variable, by-reference rule.
                 KismetExpression N() => Call(StrToInt, ScratchVar);
                 KismetExpression Rest() =>
                     Call(RightChopFn, ScratchVar,
@@ -371,22 +331,12 @@ class Program
         }
 
         // ============ header: level, XP numbers, bar, MASTERED ============
-        // The three fields the widget has to work with:
-        //   MasteryLevel    starts at 0, and counts the wrong thresholds
-        //   CurrentLevelXP  the total minus tri(MasteryLevel) * 18000
-        //   NextLevelXPMax  a ladder entry looked up by stack count, and -1 once the
-        //                   level counter hits 4, which is what makes it say MASTERED
-        // Put the first two back together and you get the planet's real total XP, and
-        // everything else follows from that:
-        //   mastered  NextLevelXPMax == -1          ->  total >= 72000
-        //   level     MasteryLevel                  ->  min(4, total/18000)
-        //   current   FTrunc(CurrentLevelXP)        ->  XP inside this level (below)
-        //   max       FTrunc(NextLevelXPMax)        ->  18000
-        //   bar       CurrentLevelXP/NextLevelXPMax ->  clamp(current/18000)
-        // The MASTERED branch is the game's own, string and full bar included. All that
-        // changes is when it runs. The two numbers stay ints handed to the game's own
-        // Format call, so they get grouped the same way as every other number in the
-        // game rather than however this code would have written them.
+        // MasteryLevel counts the wrong thresholds, CurrentLevelXP is the total minus
+        // tri(MasteryLevel) * 18000, so adding them back gives the real total:
+        //   mastered  NextLevelXPMax == -1   ->  total >= 72000
+        //   level     MasteryLevel           ->  min(4, total/18000)
+        //   current / max / bar              ->  XP inside this level, 18000, the fraction
+        // The MASTERED branch is the game's own; only when it runs changes.
         foreach (var fname in menuFunctions)
         {
             var fn = Fn(fname);
@@ -412,11 +362,9 @@ class Program
                 Call(AddInt, Call(FTruncFn, curSrc), Call(MulInt, TriL(), Int(18000)));
             KismetExpression TrueRank() =>
                 Call(MinInt, Int(4), Call(DivInt, TotalXP(), Int(18000)));
-            // XP inside the current level is x mod 18000, written out as
-            // x - (x/18000)*18000 since there is no modulo call. Every threshold is a
-            // multiple of 18,000, so this gives the right answer whether the field holds
-            // the planet's total or just the part inside the level. Max(x,0) keeps the
-            // -1 out of the sum.
+            // x mod 18000, written as x - (x/18000)*18000 since there is no modulo call.
+            // Right either way round, since every threshold is a multiple of 18,000.
+            // Max(x,0) keeps the -1 out of the sum.
             KismetExpression WindowXP(KismetExpression srcRead)
             {
                 KismetExpression X() => Call(MaxInt, Call(FTruncFn, srcRead), Int(0));
@@ -471,8 +419,8 @@ class Program
                     "cur"   => WindowXP(srcRead!),
                     "max"   => Int(18000),
                     "bar"   => Call(FClamp,
-                                   Call(DivFlt, Call(I2F, WindowXP(srcRead!)), Flt(18000f)),
-                                   Flt(0f), Flt(1f)),
+                                   Call(DivFlt, Call(I2F, WindowXP(srcRead!)), Kis.Flt(18000f)),
+                                   Kis.Flt(0f), Kis.Flt(1f)),
                     "maxed" => Call(GeInt, TotalXP(), Int(72000)),
                     "level" => TrueRank(),
                     _ => throw new Exception("unreachable")
@@ -497,14 +445,9 @@ class Program
         }
 
         // ================= row color =================
-        // Each row is drawn white or grayed out by
-        //     Array_Get(PersistentData.MasteryLevels, i, out item)
-        //     if !(item.Unlocked) goto <gray>
-        // and Unlocked is filled in from the same wrong level count, so a mastered
-        // planet still has gray rows. The test itself cannot be rewritten in place:
-        // it stores a code offset and there is no room in it. So the Array_Get in front
-        // of it is redirected instead. The new block runs it, sets item.Unlocked to
-        // (real level > i), and jumps back into the game's own test.
+        // Rows gray out on item.Unlocked, which comes from the same wrong level count. The
+        // test itself holds a code offset and cannot be rewritten in place, so the Array_Get
+        // in front of it is redirected: run it, set Unlocked to (real level > i), jump back.
         foreach (var fname in menuFunctions)
         {
             var fn = Fn(fname);

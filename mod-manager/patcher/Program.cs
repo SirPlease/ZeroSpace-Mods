@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using UAssetAPI;
 using UAssetAPI.ExportTypes;
 using UAssetAPI.FieldTypes;
@@ -8,29 +8,21 @@ using UAssetAPI.Kismet.Bytecode.Expressions;
 using UAssetAPI.PropertyTypes.Objects;
 using UAssetAPI.PropertyTypes.Structs;
 using UAssetAPI.UnrealTypes;
+using ZSPatchKit;
+using static ZSPatchKit.Kis;
 
 // ZS Mod Manager
 //
-// Builds the pak that adds a Mods page to the game's Settings screen, where each mod
-// with settings gets its own section.
+// Builds the pak that adds a Mods page to the game's Settings screen, one section per mod.
 //
 //   dotnet run --project patcher -- <manifests> <original widgets> <output folder>
 //
-// A mod says what settings it has in a small json manifest. From that, this writes two
-// things: a registration asset named after the mod, which ships inside that mod's own
-// pak, and the Mods page, which imports those names. Opening the page checks which of
-// them are actually installed, reads each one's description of itself, and builds the
-// rows there and then. A mod that is not installed fails its import quietly and its
-// section stays hidden, so any mix of mods works.
+// Each mod describes its settings in a json manifest. This writes a registration asset per
+// mod, which ships in that mod's own pak, and the Mods page, which imports those names and
+// builds rows from whichever ones are installed.
 //
-// Settings are saved as text in a map on a save file of the game's own kind, under the
-// slot name ZSModSettings, and each mod reads that map at run time. The save class also
-// carries one plain property per setting, which mods that read the properties directly
-// rely on.
-//
-// The page is built from a copy of the game's General settings page. Sections past the
-// four that page already has are cloned at build time, so the number of mods is not
-// capped.
+// Settings live in a map on a save file under the slot name ZSModSettings, plus one plain
+// property per setting. Extra sections are cloned at build time, so mod count is not capped.
 
 class Setting
 {
@@ -112,24 +104,11 @@ class Program
     static List<string> OptionsFor(ModManifest m, Setting s) =>
         s.options ?? (ModOptions.TryGetValue(m.id, out var o) ? o : new List<string>());
 
-    // A mod's registration asset belongs in that mod's own pak. A manifest can say
-    // where that pak tree is, with "pakBuild" (relative to the repo, or absolute).
-    // Without it the asset is written under the output folder, in registry\<ModId>\,
-    // for the mod author to copy into their pak.
+    // A registration asset belongs in that mod's own pak; "pakBuild" in the manifest says
+    // where. Without it the asset lands in registry\<ModId>\ for the author to copy.
 
     // The default paths are relative to the repo, and `dotnet run` starts in the
     // project folder, so climb up until the manifests come into view.
-    static string RepoRoot()
-    {
-        var dir = Directory.GetCurrentDirectory();
-        while (dir != null)
-        {
-            if (Directory.Exists(Path.Combine(dir, DefaultManifests))) return dir;
-            dir = Path.GetDirectoryName(dir);
-        }
-        return Directory.GetCurrentDirectory();
-    }
-
     static int Main(string[] args)
     {
         // --published: build the manager the public gets, which knows only the mods that
@@ -137,15 +116,14 @@ class Program
         bool publishedOnly = args.Contains("--published");
         args = args.Where(a => a != "--published").ToArray();
 
-        var root = RepoRoot();
+        var root = Repo.Root(DefaultManifests);
         ManifestDir = args.Length > 0 ? args[0] : Path.Combine(root, DefaultManifests);
         RawDir = args.Length > 1 ? args[1] : Path.Combine(root, DefaultRaw);
         PakBuild = args.Length > 2 ? args[2] : Path.Combine(root, (publishedOnly ? DefaultPublicOutput : DefaultOutput));
 
 
-        // Section order is the mod's display NAME, not its file name: the page should
-        // read the way the list reads, and renaming a manifest file must not reshuffle
-        // the UI. (It used to be the manifest's slot number, which no longer exists.)
+        // Section order is the mod's display NAME, not its file name, so renaming a
+        // manifest file does not reshuffle the page.
         var manifests = Directory.GetFiles(ManifestDir, "*.json")
             .Select(p => JsonSerializer.Deserialize<ModManifest>(File.ReadAllText(p))!)
             .OrderBy(m => m.name, StringComparer.OrdinalIgnoreCase)
@@ -182,16 +160,14 @@ class Program
         Directory.CreateDirectory(RegistryOut);
 
         BuildStoreClass(manifests);
-        // Each mod's registration asset is named after the mod and ships in that mod's
-        // own pak. The manager imports those names; one that is not installed simply
-        // fails to resolve and its section stays hidden. Nothing is numbered and the
-        // manager pak carries no registration assets at all.
+        // The manager imports each mod's registration asset by name. One that is not
+        // installed fails to resolve and its section stays hidden.
         if (Directory.Exists(RegistryOut)) Directory.Delete(RegistryOut, true);
         foreach (var m in manifests)
         {
             var tree = string.IsNullOrEmpty(m.pakBuild)
                 ? Path.Combine(PakBuild, "..", "registry", m.id)
-                : (Path.IsPathRooted(m.pakBuild) ? m.pakBuild : Path.Combine(RepoRoot(), m.pakBuild));
+                : (Path.IsPathRooted(m.pakBuild) ? m.pakBuild : Path.Combine(Repo.Root(DefaultManifests), m.pakBuild));
             // wipe first, so a renamed mod never keeps shipping its old registration
             var reg = Path.Combine(tree, @"Zerospace\Content\Mods\Registry");
             if (Directory.Exists(reg)) Directory.Delete(reg, true);
@@ -204,61 +180,6 @@ class Program
     }
 
     // ---------- shared helpers ----------
-
-    static int FindImport(UAsset asset, string objectName, string className = "")
-    {
-        for (int i = 0; i < asset.Imports.Count; i++)
-            if (asset.Imports[i].ObjectName.ToString() == objectName &&
-                (className == "" || asset.Imports[i].ClassName.ToString() == className))
-                return -(i + 1);
-        return 0;
-    }
-
-    static FPackageIndex AddImport(UAsset asset, string classPackage, string className, FPackageIndex outer, string objectName)
-    {
-        asset.Imports.Add(new Import(
-            FName.FromString(asset, classPackage),
-            FName.FromString(asset, className),
-            outer,
-            FName.FromString(asset, objectName),
-            false));
-        return new FPackageIndex(-asset.Imports.Count);
-    }
-
-    static FPackageIndex EnsurePackageImport(UAsset asset, string pkgPath)
-    {
-        int idx = FindImport(asset, pkgPath, "Package");
-        return idx != 0 ? new FPackageIndex(idx) : AddImport(asset, "/Script/CoreUObject", "Package", new FPackageIndex(0), pkgPath);
-    }
-
-    static FPackageIndex EnsureNativeClassImport(UAsset asset, string scriptPkg, string cls)
-    {
-        int idx = FindImport(asset, cls, "Class");
-        if (idx != 0) return new FPackageIndex(idx);
-        var pkg = EnsurePackageImport(asset, scriptPkg);
-        return AddImport(asset, "/Script/CoreUObject", "Class", pkg, cls);
-    }
-
-    static FPackageIndex EnsureFunctionImport(UAsset asset, string scriptPkg, string owningClass, string fn)
-    {
-        int idx = FindImport(asset, fn, "Function");
-        if (idx != 0) return new FPackageIndex(idx);
-        var cls = EnsureNativeClassImport(asset, scriptPkg, owningClass);
-        return AddImport(asset, "/Script/CoreUObject", "Function", cls, fn);
-    }
-
-    static FPackageIndex EnsureStructImport(UAsset asset, string scriptPkg, string name)
-    {
-        int idx = FindImport(asset, name, "ScriptStruct");
-        return idx != 0 ? new FPackageIndex(idx) : AddImport(asset, "/Script/CoreUObject", "ScriptStruct", EnsurePackageImport(asset, scriptPkg), name);
-    }
-
-    static FPackageIndex EnsureDefaultObject(UAsset asset, string scriptPkg, string cls)
-    {
-        string n = "Default__" + cls;
-        int i = FindImport(asset, n);
-        return i != 0 ? new FPackageIndex(i) : AddImport(asset, scriptPkg, cls, EnsurePackageImport(asset, scriptPkg), n);
-    }
 
     static void RenameNames(UAsset asset, (string From, string To)[] renames)
     {
@@ -340,48 +261,26 @@ class Program
 
     // ---------- expression builders ----------
 
-    static KismetPropertyPointer Ptr(UAsset a, FName name, FPackageIndex owner) =>
-        new KismetPropertyPointer { New = new FFieldPath { Path = new[] { name }, ResolvedOwner = owner } };
-    static KismetPropertyPointer NullPtr() =>
-        new KismetPropertyPointer { New = new FFieldPath { Path = Array.Empty<FName>(), ResolvedOwner = new FPackageIndex(0) } };
-
-    static EX_CallMath Call(FPackageIndex fn, params KismetExpression[] args) =>
-        new EX_CallMath { StackNode = fn, Parameters = args };
-    static EX_StringConst Str(string s) => new EX_StringConst { Value = s };
-    static EX_IntConst Int(int v) => new EX_IntConst { Value = v };
-
-    static int Measure(KismetExpression e)
-    {
-        int i = 0;
-        KismetSerializer.SerializeExpression(e, ref i, false);
-        return i;
-    }
-
     // library call through a Default__ CDO: Context(ObjectConst(cdo), FinalFunction)
-    static EX_Context LibCall(FPackageIndex cdoImport, FPackageIndex fn, params KismetExpression[] args)
-    {
-        var ff = new EX_FinalFunction { StackNode = fn, Parameters = args };
-        return new EX_Context
-        {
-            ObjectExpression = new EX_ObjectConst { Value = cdoImport },
-            Offset = (uint)Measure(ff),
-            RValuePointer = NullPtr(),
-            ContextExpression = ff,
-        };
-    }
-
     // obj.<NativeFn>(args): final call through an object expression
+    // ---------------- shared: mods\lib\ZSPatchKit ----------------
+    // Forwarders that take the asset first, since this patcher builds several in one run.
+    static int FindImport(UAsset a, string objectName, string className = "")
+        => Imports.Find(a, objectName, className);
+    static FPackageIndex AddImport(UAsset a, string classPackage, string className, FPackageIndex outer, string objectName)
+        => Imports.Add(a, classPackage, className, outer, objectName);
+    static FPackageIndex EnsurePackageImport(UAsset a, string pkgPath) => Imports.EnsurePackage(a, pkgPath);
+    static FPackageIndex EnsureNativeClassImport(UAsset a, string scriptPkg, string cls) => Imports.EnsureClass(a, scriptPkg, cls);
+    static FPackageIndex EnsureFunctionImport(UAsset a, string scriptPkg, string owningClass, string fn)
+        => Imports.EnsureFn(a, scriptPkg, owningClass, fn);
+    static FPackageIndex EnsureDefaultObject(UAsset a, string scriptPkg, string cls) => Imports.EnsureDefaultObject(a, scriptPkg, cls);
+
+    // The asset argument on these three is unused; it keeps the call sites unchanged.
+    static KismetPropertyPointer Ptr(UAsset a, FName name, FPackageIndex owner) => Kis.Ptr(name, owner);
+    static EX_Context ReadMember(UAsset a, KismetExpression objExpr, FName prop, FPackageIndex ownerCls)
+        => Kis.ReadMember(objExpr, prop, ownerCls);
     static EX_Context CallOn(UAsset a, KismetExpression objExpr, FPackageIndex fn, params KismetExpression[] args)
-    {
-        var ff = new EX_FinalFunction { StackNode = fn, Parameters = args };
-        return new EX_Context
-        {
-            ObjectExpression = objExpr,
-            Offset = (uint)Measure(ff),
-            RValuePointer = NullPtr(),
-            ContextExpression = ff,
-        };
-    }
+        => Kis.CallOn(objExpr, fn, null, args);
 
     // obj.<BPorVirtualFn>(args): name-resolved virtual call
     static EX_Context VCallOn(UAsset a, KismetExpression objExpr, string fn, params KismetExpression[] args)
@@ -406,18 +305,6 @@ class Program
             Offset = (uint)Measure(call),
             RValuePointer = NullPtr(),
             ContextExpression = call,
-        };
-    }
-
-    static EX_Context ReadMember(UAsset a, KismetExpression objExpr, FName prop, FPackageIndex ownerCls)
-    {
-        var iv = new EX_InstanceVariable { Variable = Ptr(a, prop, ownerCls) };
-        return new EX_Context
-        {
-            ObjectExpression = objExpr,
-            Offset = (uint)Measure(iv),
-            RValuePointer = Ptr(a, prop, ownerCls),
-            ContextExpression = iv,
         };
     }
 
@@ -547,11 +434,8 @@ class Program
     }
 
     // ---------- widget cloning (used to add settings sections past the donor's four) ----------
-    // A section is three plain widgets: a VerticalBox holding a CommonTextBlock header
-    // and a second VerticalBox that the rows go into. Each widget also has a slot
-    // export that ties it to its parent. Cloning one means copying all six exports,
-    // pointing them at each other instead of at the originals, and telling the page
-    // class about the three new widget names so the bytecode can reach them.
+    // A section is three widgets plus a slot export each. Cloning one copies all six,
+    // repoints them at each other, and adds the three names to the page class.
 
     static NormalExport CloneExport(NormalExport src, string newName)
     {
@@ -944,10 +828,8 @@ class Program
         var fnSetStrP = EnsureFunctionImport(page, "/Script/Engine", "KismetSystemLibrary", "SetStringPropertyByName");
         var fnConcat = EnsureFunctionImport(page, "/Script/Engine", "KismetStringLibrary", "Concat_StrStr");
 
-        // Writing a value: put it in the map under the setting's name, and also try to
-        // write the plain property of that name. The second write does nothing when the
-        // property is absent, and it is what lets a mod that reads properties rather
-        // than the map pick the change up straight away.
+        // Write the value into the map, and into the plain property of the same name for
+        // mods that read properties. The second write is a no-op when it is absent.
         List<(string?, KismetExpression, string?)> StoreWrite(FunctionExport f, Func<KismetExpression> valueInt, bool dropdown)
         {
             var objL = AddLocal(f, ObjProp(page, "ZSDM_Obj", EnsureNativeClassImport(page, "/Script/Engine", "SaveGame")));
@@ -997,10 +879,8 @@ class Program
             var body = StoreWrite(f, () => PVar(f, "NewValue"), dropdown: false);
             if (isMaster)
             {
-                // Every mod's master switch lands here. The delegate only passes the
-                // setting name and the new value, with no sender, so the name is what
-                // says which mod fired: match it against each mod's master key, then
-                // gray that section's other rows (children 1..N-1).
+                // Every mod's master switch lands here, and the delegate passes no sender,
+                // so the setting name says which mod fired.
                 var iL = AddLocal(f, IntProp(page, "ZSDM_I"));
                 var nL = AddLocal(f, IntProp(page, "ZSDM_N"));
                 var childL = AddLocal(f, ObjProp(page, "ZSDM_Child", clsObject));

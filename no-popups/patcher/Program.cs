@@ -1,4 +1,4 @@
-// No Popups
+﻿// No Popups
 //
 // Stops the two windows that open by themselves in the menus: the Early Access welcome,
 // and the Galactic War preview.
@@ -9,27 +9,26 @@ using UAssetAPI.Kismet;
 using UAssetAPI.Kismet.Bytecode;
 using UAssetAPI.Kismet.Bytecode.Expressions;
 using UAssetAPI.UnrealTypes;
+using ZSPatchKit;
+using static ZSPatchKit.Kis;
 
 class Program
 {
     const string DefaultInput = @"mods\nopopups\raw";
     const string DefaultOutput = @"mods\nopopups\pak_build";
 
-    static UAsset asset = null!;
+    static ModAsset A = null!;
+    static UAsset asset => A.Asset;
 
     static void Main(string[] args)
     {
-        var root = RepoRoot();
+        var root = Repo.Root(DefaultInput);
         var inDir = args.Length > 0 ? args[0] : Path.Combine(root, DefaultInput);
         var outRoot = args.Length > 1 ? args[1] : Path.Combine(root, DefaultOutput);
 
-        // Each window is stopped from being asked for, rather than closed after it
-        // opens. Closing one from code leaves the menu input in the wrong state and you
-        // lose camera control for the rest of the session.
-        //
-        // The offsets are read from game build 24727905. The patcher checks that the
-        // statement it is about to change really is the jump it expects, so a game update
-        // that moves this code fails the build instead of shipping a broken pak.
+        // Each window is stopped from being asked for, not closed after it opens: closing
+        // one from code loses camera control for the session. Offsets are from build
+        // 24727905, and each one is checked before it is changed.
 
         // 1. Early Access welcome. The menu graph reads "has the player seen it", and
         //    on "no" falls through to the show block. Send that jump to the skip path.
@@ -54,35 +53,16 @@ class Program
         Console.WriteLine("OK");
     }
 
-    // Default paths are relative to the repo, and `dotnet run` starts in the project
-    // folder, so climb up until the input folder comes into view.
-    static string RepoRoot()
-    {
-        var dir = Directory.GetCurrentDirectory();
-        while (dir != null)
-        {
-            if (Directory.Exists(Path.Combine(dir, DefaultInput))) return dir;
-            dir = Path.GetDirectoryName(dir);
-        }
-        return Directory.GetCurrentDirectory();
-    }
+    // Repo root and Measure: mods\lib\ZSPatchKit.
 
-    static int Measure(KismetExpression e)
-    {
-        int i = 0;
-        KismetSerializer.SerializeExpression(e, ref i, false);
-        return i;
-    }
 
-    // pivot: where the jump that leads to the popup lives.
-    // show:  where it currently goes, checked so a moved layout fails loudly.
-    // skip:  where it should go instead. null means "end this flow", which is what the
-    //        widget's own skip path does.
+    // pivot: the jump that leads to the popup. show: where it goes now, checked.
+    // skip:  where it should go, or null for "end this flow", as vanilla's skip path does.
     static void Patch(string inDir, string outRoot, string assetName, string ubergraph, string relPath,
         uint pivot, uint show, uint? skip, bool pivotIsBranch = false)
     {
         Console.WriteLine($"=== {assetName} ===");
-        asset = new UAsset(Path.Combine(inDir, assetName + ".uasset"), EngineVersion.VER_UE4_27);
+        A = ModAsset.Load(Path.Combine(inDir, assetName + ".uasset"));
         if (!asset.VerifyBinaryEquality()) throw new Exception($"{assetName}: round-trip not binary-equal");
         KismetSerializer.asset = asset;
 

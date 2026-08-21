@@ -35,7 +35,7 @@ Delete the file.
 
 ## Compatibility
 
-- Built for game build **24727905** (the 2026-08-15 patch).  
+- Built for game build **24827478** (the 2026-08-20 patch).  
   A game update that changes the in-match HUD may require an updated version of this pak.
 - Conflicts with any other mod that replaces the same HUD widget (`RTSSampleHUDWidget`).
 - Options live in **Settings -> Mods**.  
