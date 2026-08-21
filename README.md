@@ -6,7 +6,7 @@ No game file is changed, and nothing is added to your install except the pak its
 
 | Mod | What it does | Mod Manager | Host |
 |---|---|---|---|
-| [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel | ❌ | ❌ |
+| [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows on a planet's panel and on the match end screen | ❌ | ❌ |
 | [Mastered Marker](mastered-marker/) | Shows a planet's mastery rank, and marks the mastered ones, on the galaxy map's hover tooltip | ❌ | ❌ |
 | [Block Auto Chase](block-auto-chase/) | Stops your units walking back into a fight after you send them somewhere else | ❌ | ✅ |
 | [No Popups](no-popups/) | Stops the Early Access welcome and the Galactic War preview from opening by themselves | ❌ | ❌ |

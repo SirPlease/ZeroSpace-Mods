@@ -25,12 +25,17 @@ class Program
     const string OutputRoot   = @"mods\masterypanelfix\pak_build";
     const string AssetSubDir  = @"Zerospace\Content\RTSGameSample\UI\MainMenu\StarSystemDetails";
 
+    const string EndScreenAsset  = @"mods\masterypanelfix\raw\WBP_MMOEndScreen.uasset";
+    const string EndScreenSubDir = @"Zerospace\Content\Nova\UI";
+
     static void Main(string[] args)
     {
         var root = Repo.Root(VanillaAsset);
         var inPath  = args.Length > 0 ? args[0] : System.IO.Path.Combine(root, VanillaAsset);
         var outRoot = args.Length > 1 ? args[1] : System.IO.Path.Combine(root, OutputRoot);
         PatchPlanetPanel(inPath, outRoot);
+        var endIn = args.Length > 2 ? args[2] : System.IO.Path.Combine(root, EndScreenAsset);
+        PatchEndScreen(endIn, outRoot);
     }
 
     // Repo root, imports and expression builders: mods\lib\ZSPatchKit.
@@ -547,5 +552,272 @@ class Program
         if (!(code[last] is EX_EndOfScript)) throw new Exception(fn.ObjectName + " does not end with EndOfScript");
         code.InsertRange(last, tails);
         fn.ScriptBytecode = code.ToArray();
+    }
+
+    // ================= match end screen: mastery level, bar and rows =================
+    // The end screen prints the wire's CurrentMasteryLevel, which is the stack count
+    // (0/1/3/6/10), fills its bar from a window the game looks up by that same count, and
+    // writes the mastery's per-stack line into every row. All three are rebuilt here from the
+    // node's real XP, OGXPMastery + XPMastery, the way the planet panel is fixed.
+    static void PatchEndScreen(string inPath, string outRoot)
+    {
+        Console.WriteLine();
+        Console.WriteLine("in:  " + inPath);
+        A = ModAsset.Load(inPath);
+        KismetSerializer.asset = asset;
+        if (!asset.VerifyBinaryEquality()) throw new Exception("end screen donor round-trip not binary-equal");
+
+        var cls = asset.Exports.OfType<ClassExport>().Single();
+        var clsIdx = new FPackageIndex(asset.Exports.IndexOf(cls) + 1);
+
+        // ---------- a fourth row widget ----------
+        // The screen ships three (PowerStringMastery_1..3) but mastery has four ranks, so the
+        // ladder cannot be shown without one more. Cloned from row 3, slot and all, and hung
+        // in the same column directly after it.
+        var row3 = Widgets.Widget(asset, "PowerStringMastery_3");
+        var refShape = (NormalExport)asset.Exports[asset.Exports.IndexOf(row3)];
+        int slot3Idx = Widgets.OProp(row3, "Slot").Value.Index;
+        var slot3 = (NormalExport)asset.Exports[slot3Idx - 1];
+        var column = (NormalExport)asset.Exports[slot3.OuterIndex.Index - 1];
+        var (row4, slot4) = Widgets.ClonePair(asset, cls, row3, "PowerStringMastery_4");
+        Widgets.InsertSlotAfter(asset, column, slot3Idx, Widgets.ExportIdx(asset, slot4));
+        Console.WriteLine($"  + PowerStringMastery_4 under {column.ObjectName} (slot after {slot3.ObjectName})");
+        foreach (var problem in ModAsset.CompareExportShape(row4, refShape, "PowerStringMastery_4"))
+            throw new Exception(problem);
+
+        var fn = A.Function("FillEndscreenData");
+        var code = fn.ScriptBytecode.ToList();
+        var fnIdx = new FPackageIndex(asset.Exports.IndexOf(fn) + 1);
+
+        FPackageIndex FindFnOpt(string name)
+        {
+            for (int i = 0; i < asset.Imports.Count; i++)
+                if (asset.Imports[i].ObjectName.ToString() == name && asset.Imports[i].ClassName.ToString() == "Function")
+                    return new FPackageIndex(-(i + 1));
+            return new FPackageIndex(0);
+        }
+        FPackageIndex FindOrAdd(string owner, string name)
+        {
+            var f = FindFnOpt(name);
+            return f.Index != 0 ? f : A.AddFunctionImportUnder(owner, name);
+        }
+
+        var AddInt   = FindOrAdd("KismetMathLibrary", "Add_IntInt");
+        var SubInt   = FindOrAdd("KismetMathLibrary", "Subtract_IntInt");
+        var MulInt   = FindOrAdd("KismetMathLibrary", "Multiply_IntInt");
+        var GeInt    = FindOrAdd("KismetMathLibrary", "GreaterEqual_IntInt");
+        var B2I      = FindOrAdd("KismetMathLibrary", "Conv_BoolToInt");
+        var I2F      = FindOrAdd("KismetMathLibrary", "Conv_IntToFloat");
+        var DivFlt   = FindOrAdd("KismetMathLibrary", "Divide_FloatFloat");
+        var FClampFn = FindOrAdd("KismetMathLibrary", "FClamp");
+        var I2S      = FindOrAdd("KismetStringLibrary", "Conv_IntToString");
+        var ConcatSS = FindOrAdd("KismetStringLibrary", "Concat_StrStr");
+        var StrToInt = FindOrAdd("KismetStringLibrary", "Conv_StringToInt");
+        var RightChop= FindOrAdd("KismetStringLibrary", "RightChop");
+        var I2T      = FindOrAdd("KismetTextLibrary", "Conv_IntToText");
+        var T2S      = FindOrAdd("KismetTextLibrary", "Conv_TextToString");
+        var S2T      = FindOrAdd("KismetTextLibrary", "Conv_StringToText");
+
+        string CallName(KismetExpression e) => e switch
+        {
+            EX_VirtualFunction v => v.VirtualFunctionName.ToString(),
+            EX_FinalFunction ff when ff.StackNode.Index < 0 => asset.Imports[-ff.StackNode.Index - 1].ObjectName.ToString(),
+            EX_FinalFunction ff when ff.StackNode.Index > 0 => asset.Exports[ff.StackNode.Index - 1].ObjectName.ToString(),
+            _ => ""
+        };
+        string WidgetOf(KismetExpression e) =>
+            e is EX_InstanceVariable iv && iv.Variable?.New?.Path?.Length > 0
+                ? iv.Variable.New.Path[0].ToString() : "";
+
+        // vanilla reads every wire field the same way: GetIntFromProp(PC.LastMatchEndData, "<key>")
+        EX_Let Read(string key) => code.OfType<EX_Let>().FirstOrDefault(l =>
+            l.Expression is EX_CallMath cm && CallName(cm) == "GetIntFromProp"
+            && cm.Parameters.Length >= 2
+            && cm.Parameters[1] is EX_StringConst s && s.Value == key)
+            ?? throw new Exception("end screen: no read of " + key);
+
+        var ogRead    = Read("OGXPMastery");           // node XP before the match
+        var xpRead    = Read("XPMastery");             // what this match paid
+        var totalRead = Read("CurrentMasteryXPMax");   // its local carries the total
+        var rankRead  = Read("CurrentMasteryXPMin");   // its local carries the rank
+
+        // locals this function already declares, all dead by the time the tail runs
+        KismetPropertyPointer P(string n) => Kis.Ptr(FName.FromString(asset, n), fnIdx);
+        EX_LocalVariable L(string n) => new EX_LocalVariable { Variable = P(n) };
+        EX_Let Set(string n, KismetExpression e) => new EX_Let { Value = P(n), Variable = L(n), Expression = e };
+        const string DescText  = "CallFunc_GetItemShortDescription_ReturnValue_1";
+        const string SLabel    = "CallFunc_GetStringFromProp_ReturnValue";
+        const string SXp       = "CallFunc_GetStringFromProp_ReturnValue_1";
+        const string SOut      = "CallFunc_GetStringFromProp_ReturnValue_2";
+        const string SDesc     = "CallFunc_Array_Get_Item";
+        const string TXp       = "CallFunc_Conv_StringToText_ReturnValue";
+        const string TOut      = "CallFunc_Conv_StringToText_ReturnValue_1";
+        const string NPer      = "CallFunc_GetIntFromProp_ReturnValue_7";   // per-stack number
+        foreach (var n in new[] { DescText, SLabel, SXp, SOut, SDesc, TXp, TOut, NPer })
+            if (!fn.LoadedProperties.Any(pr => pr.Name.ToString() == n))
+                throw new Exception("end screen: expected local " + n + " is gone");
+
+        int textIdx = code.FindIndex(st => st is EX_Context c
+            && WidgetOf(c.ObjectExpression) == "TextBoxMasteryLevel"
+            && CallName(c.ContextExpression) == "SetText");
+        if (textIdx < 0) throw new Exception("end screen: no SetText on TextBoxMasteryLevel");
+        var textCtx = (EX_Context)code[textIdx];
+
+        int barIdx = code.FindIndex(st => st is EX_Context c
+            && WidgetOf(c.ObjectExpression) == "BarMasteryBar"
+            && CallName(c.ContextExpression) == "SetPercent");
+        if (barIdx < 0) throw new Exception("end screen: no SetPercent on BarMasteryBar");
+        var barStmt = code[barIdx];
+        if (((EX_FinalFunction)((EX_Context)barStmt).ContextExpression).Parameters[0] is not EX_LocalVariable pctLocal)
+            throw new Exception("end screen: SetPercent does not take a plain local");
+
+        // the two row colours the game already uses: dim for every row, lit for the ones held
+        var colourWrites = code.OfType<EX_Let>().Where(l =>
+            l.Variable is EX_StructMemberContext sm && sm.StructMemberExpression?.New?.Path?.Length > 0
+            && sm.StructMemberExpression.New.Path[0].ToString() == "SpecifiedColor").ToList();
+        if (colourWrites.Count < 2) throw new Exception("end screen: expected two row colours");
+        var dimColour = colourWrites[0];
+        var litColour = colourWrites[1];
+        int ruleIdx = code.IndexOf(dimColour) + 1;
+        if (code[ruleIdx] is not EX_Let colourRule
+            || colourRule.Variable is not EX_StructMemberContext rsm
+            || rsm.StructMemberExpression.New.Path[0].ToString() != "ColorUseRule")
+            throw new Exception("end screen: colour write is not followed by ColorUseRule");
+        int colourCallIdx = code.FindIndex(ruleIdx, st => st is EX_Context c
+            && CallName(c.ContextExpression) == "SetColorAndOpacity");
+        if (colourCallIdx < 0) throw new Exception("end screen: no SetColorAndOpacity after the colour write");
+        var colourCtx = (EX_Context)code[colourCallIdx];
+        var colourArg = Args(colourCtx.ContextExpression)[0];
+
+        KismetExpression[] Args(KismetExpression call) => call switch
+        {
+            EX_VirtualFunction v => v.Parameters,
+            EX_FinalFunction f => f.Parameters,
+            _ => throw new Exception("end screen: not a call"),
+        };
+
+        EX_Let Assign(EX_Let template, KismetExpression value) =>
+            new EX_Let { Value = template.Value, Variable = template.Variable, Expression = value };
+        KismetExpression V(EX_Let read) => read.Variable;
+        KismetExpression Cat(KismetExpression a, KismetExpression b) => Call(ConcatSS, a, b);
+
+        // the same call vanilla makes, aimed at one of the named widgets
+        EX_Context OnWidget(EX_Context template, string widget, KismetExpression arg)
+        {
+            KismetExpression call = template.ContextExpression switch
+            {
+                EX_VirtualFunction v => new EX_VirtualFunction { VirtualFunctionName = v.VirtualFunctionName, Parameters = new[] { arg } },
+                EX_FinalFunction f => new EX_FinalFunction { StackNode = f.StackNode, Parameters = new[] { arg } },
+                _ => throw new Exception("end screen: call template is neither virtual nor final"),
+            };
+            return new EX_Context
+            {
+                ObjectExpression = new EX_InstanceVariable { Variable = Kis.Ptr(FName.FromString(asset, widget), clsIdx) },
+                RValuePointer = Kis.NullPtr(),
+                Offset = (uint)Measure(call),
+                ContextExpression = call,
+            };
+        }
+
+        // rank = how many of the four thresholds the total has passed
+        KismetExpression Step(int t) => Call(B2I, Call(GeInt, V(totalRead), Int(t)));
+        var rankExpr = Call(AddInt, Call(AddInt, Call(AddInt,
+            Step(18000), Step(36000)), Step(54000)), Step(72000));
+
+        var tail = new List<KismetExpression>();
+        var jumps = new List<(KismetExpression stmt, string label)>();
+        var labels = new Dictionary<string, int>();
+        void Mark(string l) => labels[l] = tail.Count;
+        EX_JumpIfNot IfNot(KismetExpression cond, string l)
+        {
+            var j = new EX_JumpIfNot { BooleanExpression = cond };
+            jumps.Add((j, l)); return j;
+        }
+        EX_Jump Goto(string l) { var j = new EX_Jump(); jumps.Add((j, l)); return j; }
+
+        tail.Add(Assign(ogRead, ogRead.Expression));
+        tail.Add(Assign(xpRead, xpRead.Expression));
+        tail.Add(Assign(totalRead, Call(AddInt, V(ogRead), V(xpRead))));   // XP the node holds now
+        tail.Add(Assign(rankRead, rankExpr));
+
+        // ---- the level line: "MASTERY LVL N/4 [+N XP]" ----
+        // The widget is set to upper case, so the text is written in normal case and the game
+        // shouts it. The XP goes through Conv_IntToText so it is grouped the way the game
+        // groups numbers. The label is a literal: vanilla's is the localized "Mastery level",
+        // which does not abbreviate, and the short form is what fits the panel.
+        tail.Add(Set(TXp,    Call(I2T, V(xpRead), new EX_False(), new EX_True(), Int(1), Int(324))));
+        tail.Add(Set(SXp,    Call(T2S, L(TXp))));
+        tail.Add(Set(SOut,   Cat(Str("Mastery lvl "), Call(I2S, V(rankRead)))));
+        tail.Add(Set(SOut,   Cat(L(SOut), Str("/4 [+"))));
+        tail.Add(Set(SOut,   Cat(L(SOut), L(SXp))));
+        tail.Add(Set(SOut,   Cat(L(SOut), Str(" XP]"))));
+        tail.Add(Set(TOut,   Call(S2T, L(SOut))));
+        tail.Add(OnWidget(textCtx, "TextBoxMasteryLevel", L(TOut)));
+
+        // ---- the four rows: what the planet gives at each rank ----
+        // Every description reads "+<number>[%] <words>", so the number is read back out and
+        // multiplied by the stacks that rank holds: 1, 3, 6 then 10, which is n(n+1)/2.
+        tail.Add(Set(SDesc, Call(T2S, L(DescText))));
+        tail.Add(Set(NPer,  Call(StrToInt, L(SDesc))));
+        tail.Add(Set(SLabel, Call(RightChop, L(SDesc),
+            Call(AddInt, Int(2), Call(B2I, Call(GeInt, L(NPer), Int(10)))))));   // the words after the number
+
+        int[] stacks = { 1, 3, 6, 10 };
+        for (int i = 1; i <= 4; i++)
+        {
+            string widget = "PowerStringMastery_" + i;
+            tail.Add(Set(SOut, Cat(Cat(Str("+"), Call(I2S, Call(MulInt, L(NPer), Int(stacks[i - 1])))), L(SLabel))));
+            tail.Add(Set(TOut, Call(S2T, L(SOut))));
+            tail.Add(OnWidget(textCtx, widget, L(TOut)));
+
+            tail.Add(IfNot(Call(GeInt, V(rankRead), Int(i)), "DIM" + i));
+            tail.Add(Assign(dimColour, litColour.Expression));
+            tail.Add(colourRule);
+            tail.Add(OnWidget(colourCtx, widget, colourArg));
+            tail.Add(Goto("END" + i));
+            Mark("DIM" + i);
+            tail.Add(Assign(dimColour, dimColour.Expression));
+            tail.Add(colourRule);
+            tail.Add(OnWidget(colourCtx, widget, colourArg));
+            Mark("END" + i);
+        }
+
+        // ---- the bar: XP inside the current rank ----
+        // Past rank 4 the clamp holds it full, which is what a mastered planet should read.
+        tail.Add(Assign(ogRead, Call(SubInt, V(totalRead), Call(MulInt, V(rankRead), Int(18000)))));
+        tail.Add(new EX_Let
+        {
+            Value = pctLocal.Variable,
+            Variable = pctLocal,
+            Expression = Call(FClampFn, Call(DivFlt, Call(I2F, V(ogRead)), Flt(18000f)), Flt(0f), Flt(1f)),
+        });
+        tail.Add(barStmt);
+
+        // Appended before the final Return, so no existing statement moves and no jump target
+        // changes. Anything that jumped to the Return now falls through the tail.
+        int retIdx = code.FindLastIndex(st => st is EX_Return);
+        if (retIdx < 0) throw new Exception("end screen: no EX_Return in FillEndscreenData");
+        int tailStart = code.Take(retIdx).Sum(Measure);
+
+        var offs = new int[tail.Count + 1];
+        for (int i = 0, cur = tailStart; i < tail.Count; i++) { offs[i] = cur; cur += Measure(tail[i]); offs[i + 1] = cur; }
+        foreach (var (stmt, label) in jumps)
+        {
+            uint target = (uint)offs[labels[label]];
+            switch (stmt)
+            {
+                case EX_Jump j: j.CodeOffset = target; break;
+                case EX_JumpIfNot jn: jn.CodeOffset = target; break;
+            }
+        }
+
+        code.InsertRange(retIdx, tail);
+        fn.ScriptBytecode = code.ToArray();
+
+        Console.WriteLine($"FillEndscreenData: {code.Count - tail.Count} vanilla statements + {tail.Count} appended");
+        ModAsset.ValidateJumps(fn, "WBP_MMOEndScreen.FillEndscreenData");
+        A.ValidateExports("WBP_MMOEndScreen");
+        A.ValidateProperties("WBP_MMOEndScreen");
+        A.WriteAndVerify(System.IO.Path.Combine(outRoot, EndScreenSubDir, "WBP_MMOEndScreen.uasset"), "WBP_MMOEndScreen");
     }
 }
