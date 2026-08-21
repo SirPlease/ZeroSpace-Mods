@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ZSPatchKit</RootNamespace>
+    <!-- Smart App Control blocks freshly built assemblies BY HASH, and .NET builds are
+         deterministic, so a blocked build stays blocked however many times it is rebuilt.
+         Bump this to change the hash. See the Gotchas section in CLAUDE.md. -->
+    <Version>1.0.6</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="UAssetAPI" Version="1.1.0" />
+  </ItemGroup>
+
+</Project>

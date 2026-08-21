@@ -7,6 +7,7 @@ No game file is changed, and nothing is added to your install except the pak its
 | Mod | What it does | Mod Manager |
 |---|---|---|
 | [Mastery Panel Fix](mastery-panel-fix/) | Fixes the mastery level, XP and level rows shown on a planet's panel | ❌ |
+| [Mastered Marker](mastered-marker/) | Shows a planet's mastery rank, and marks the mastered ones, on the galaxy map's hover tooltip | ❌ |
 | [No Popups](no-popups/) | Stops the Early Access welcome and the Galactic War preview from opening by themselves | ❌ |
 | [Team Colors](team-colors/) | Colors players by who they are to you: yourself, your teammate, mission allies, enemies | ✅ |
 
@@ -57,6 +58,9 @@ widget as input, and you take that from your own copy of the game.
    ```powershell
    repak.exe pack --version V11 -m "../../../" <output folder> zzzz_<Mod>_P.pak
    ```
+
+The newer patchers share a small library, [`lib/ZSPatchKit`](lib/ZSPatchKit).  
+Keep it where it is and they will find it.
 
 ## How the mods work
 
